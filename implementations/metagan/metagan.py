@@ -43,8 +43,8 @@ opt = parser.parse_args()
 print(opt)
 
 # Create sample and checkpoint directories
-os.makedirs("images/%s" % opt.dataset_name, exist_ok=True)
-os.makedirs("saved_models/%s" % opt.dataset_name, exist_ok=True)
+os.makedirs("images_m/%s" % opt.dataset_name, exist_ok=True)
+os.makedirs("saved_models_m/%s" % opt.dataset_name, exist_ok=True)
 
 # Losses
 criterion_GAN = torch.nn.MSELoss()
@@ -55,33 +55,44 @@ cuda = torch.cuda.is_available()
 
 input_shape = (opt.channels, opt.img_height, opt.img_width)
 
+# a/b are meta-S/meta-T images
+# A/B are S/T images
+
 # Initialize generator and discriminator
-G_AB = GeneratorResNet(input_shape, opt.n_residual_blocks)
-G_BA = GeneratorResNet(input_shape, opt.n_residual_blocks)
-D_A = Discriminator(input_shape)
-D_B = Discriminator(input_shape)
+G_AB = MultiInputGeneratorResNet(input_shape, opt.n_residual_blocks)
+G_BA = MultiInputGeneratorResNet(input_shape, opt.n_residual_blocks)
+D_a = Discriminator(input_shape)
+D_b = Discriminator(input_shape)
+D_A = MultiInputDiscriminator(input_shape)
+D_B = MultiInputDiscriminator(input_shape)
 
 if cuda:
     G_AB = G_AB.cuda()
     G_BA = G_BA.cuda()
     D_A = D_A.cuda()
     D_B = D_B.cuda()
+    D_a = D_a.cuda()
+    D_b = D_b.cuda()
     criterion_GAN.cuda()
     criterion_cycle.cuda()
     criterion_identity.cuda()
 
 if opt.epoch != 0:
     # Load pretrained models
-    G_AB.load_state_dict(torch.load("saved_models/%s/G_AB_%d.pth" % (opt.dataset_name, opt.epoch)))
-    G_BA.load_state_dict(torch.load("saved_models/%s/G_BA_%d.pth" % (opt.dataset_name, opt.epoch)))
-    D_A.load_state_dict(torch.load("saved_models/%s/D_A_%d.pth" % (opt.dataset_name, opt.epoch)))
-    D_B.load_state_dict(torch.load("saved_models/%s/D_B_%d.pth" % (opt.dataset_name, opt.epoch)))
+    G_AB.load_state_dict(torch.load("saved_models_m/%s/G_AB_%d.pth" % (opt.dataset_name, opt.epoch)))
+    G_BA.load_state_dict(torch.load("saved_models_m/%s/G_BA_%d.pth" % (opt.dataset_name, opt.epoch)))
+    D_A.load_state_dict(torch.load("saved_models_m/%s/D_A_%d.pth" % (opt.dataset_name, opt.epoch)))
+    D_B.load_state_dict(torch.load("saved_models_m/%s/D_B_%d.pth" % (opt.dataset_name, opt.epoch)))
+    D_a.load_state_dict(torch.load("saved_models_m/%s/D_a_%d.pth" % (opt.dataset_name, opt.epoch)))
+    D_b.load_state_dict(torch.load("saved_models_m/%s/D_b_%d.pth" % (opt.dataset_name, opt.epoch)))
 else:
     # Initialize weights
     G_AB.apply(weights_init_normal)
     G_BA.apply(weights_init_normal)
     D_A.apply(weights_init_normal)
     D_B.apply(weights_init_normal)
+    D_a.apply(weights_init_normal)
+    D_b.apply(weights_init_normal)
 
 # Optimizers
 optimizer_G = torch.optim.Adam(
@@ -89,6 +100,8 @@ optimizer_G = torch.optim.Adam(
 )
 optimizer_D_A = torch.optim.Adam(D_A.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
 optimizer_D_B = torch.optim.Adam(D_B.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+optimizer_D_a = torch.optim.Adam(D_a.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+optimizer_D_b = torch.optim.Adam(D_b.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
 
 # Learning rate update schedulers
 lr_scheduler_G = torch.optim.lr_scheduler.LambdaLR(
@@ -100,25 +113,42 @@ lr_scheduler_D_A = torch.optim.lr_scheduler.LambdaLR(
 lr_scheduler_D_B = torch.optim.lr_scheduler.LambdaLR(
     optimizer_D_B, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step
 )
+lr_scheduler_D_a = torch.optim.lr_scheduler.LambdaLR(
+    optimizer_D_a, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step
+)
+lr_scheduler_D_b = torch.optim.lr_scheduler.LambdaLR(
+    optimizer_D_b, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step
+)
 
 Tensor = torch.cuda.FloatTensor if cuda else torch.Tensor
 
 # Buffers of previously generated samples
 fake_A_buffer = ReplayBuffer()
 fake_B_buffer = ReplayBuffer()
+fake_a_buffer = ReplayBuffer()
+fake_b_buffer = ReplayBuffer()
 
 # Image transformations
 transforms_ = [
-    transforms.Resize(int(opt.img_height * 1.12), Image.BICUBIC),
-    transforms.RandomCrop((opt.img_height, opt.img_width)),
-    transforms.RandomHorizontalFlip(),
+    transforms.Resize(opt.img_height, Image.BICUBIC),
+#     transforms.Resize(int(opt.img_height * 1.12), Image.BICUBIC),
+#     transforms.RandomCrop((opt.img_height, opt.img_width)),
+#     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+]
+transforms_gray_ = [
+    transforms.Resize(opt.img_height, Image.BICUBIC),
+#     transforms.Resize(int(opt.img_height * 1.12), Image.BICUBIC),
+#     transforms.RandomCrop((opt.img_height, opt.img_width)),
+#     transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,)),
 ]
 
 # Training data loader
 dataloader = DataLoader(
-    PACS_Dataset("../../data/%s" % opt.dataset_name, transforms_=transforms_, unaligned=True),
+    PACS_Dataset("../../data/%s" % opt.dataset_name, transforms_=transforms_, unaligned=True, transforms_gray_=transforms_gray_),
 #     ImageDataset("../../data/%s" % opt.dataset_name, transforms_=transforms_, unaligned=True),
     batch_size=opt.batch_size,
     shuffle=True,
@@ -126,11 +156,11 @@ dataloader = DataLoader(
 )
 # Test data loader
 val_dataloader = DataLoader(
-    PACS_Dataset("../../data/%s" % opt.dataset_name, transforms_=transforms_, unaligned=True, mode="test"),
+    PACS_Dataset("../../data/%s" % opt.dataset_name, transforms_=transforms_, unaligned=True, mode="test", transforms_gray_=transforms_gray_),
 #     ImageDataset("../../data/%s" % opt.dataset_name, transforms_=transforms_, unaligned=True, mode="test"),
     batch_size=5,
     shuffle=True,
-    num_workers=1,
+    num_workers=4,
 )
 
 
@@ -140,17 +170,24 @@ def sample_images(batches_done):
     G_AB.eval()
     G_BA.eval()
     real_A = Variable(imgs["A"].type(Tensor))
-    fake_B = G_AB(real_A)
+    real_gray_A = Variable(imgs["gray_A"].type(Tensor))
+    fake_B, fake_gray_B = G_AB(real_A, real_gray_A)
     real_B = Variable(imgs["B"].type(Tensor))
-    fake_A = G_BA(real_B)
+    real_gray_B = Variable(imgs["gray_B"].type(Tensor))
+    fake_A, fake_gray_A = G_BA(real_B, real_gray_B)
     # Arange images along x-axis
     real_A = make_grid(real_A, nrow=5, normalize=True)
     real_B = make_grid(real_B, nrow=5, normalize=True)
     fake_A = make_grid(fake_A, nrow=5, normalize=True)
     fake_B = make_grid(fake_B, nrow=5, normalize=True)
+
+    real_gray_A = make_grid(real_gray_A, nrow=5, normalize=True)
+    fake_gray_B = make_grid(fake_gray_B, nrow=5, normalize=True)
+    real_gray_B = make_grid(real_gray_B, nrow=5, normalize=True)
+    fake_gray_A = make_grid(fake_gray_A, nrow=5, normalize=True)
     # Arange images along y-axis
-    image_grid = torch.cat((real_A, fake_B, real_B, fake_A), 1)
-    save_image(image_grid, "images/%s/%s.png" % (opt.dataset_name, batches_done), normalize=False)
+    image_grid = torch.cat((real_A, real_gray_A, fake_B, fake_gray_B, real_B, real_gray_B, fake_A, fake_gray_A), 1)
+    save_image(image_grid, "images_m/%s/%s.png" % (opt.dataset_name, batches_done), normalize=False)
 
 
 # ----------
@@ -164,6 +201,8 @@ for epoch in range(opt.epoch, opt.n_epochs):
         # Set model input
         real_A = Variable(batch["A"].type(Tensor))
         real_B = Variable(batch["B"].type(Tensor))
+        real_gray_A = Variable(batch["gray_A"].type(Tensor))
+        real_gray_B = Variable(batch["gray_B"].type(Tensor))
 
         # Adversarial ground truths
         valid = Variable(Tensor(np.ones((real_A.size(0), *D_A.output_shape))), requires_grad=False)
@@ -179,31 +218,43 @@ for epoch in range(opt.epoch, opt.n_epochs):
         optimizer_G.zero_grad()
 
         # Identity loss
-        loss_id_A = criterion_identity(G_BA(real_A), real_A)
-        loss_id_B = criterion_identity(G_AB(real_B), real_B)
+        i_fake_A, i_fake_gray_A = G_BA(real_A, real_gray_A)
+        i_fake_B, i_fake_gray_B = G_AB(real_B, real_gray_B)
+
+        loss_id_A = criterion_identity(i_fake_A, real_A)
+        loss_id_B = criterion_identity(i_fake_B, real_B)
+        loss_id_a = criterion_identity(i_fake_gray_A, real_gray_A)
+        loss_id_b = criterion_identity(i_fake_gray_B, real_gray_B)
 
         loss_identity = (loss_id_A + loss_id_B) / 2
+        loss_identity_meta = (loss_id_a + loss_id_a) / 2
 
         # GAN loss
-        fake_B = G_AB(real_A)
-        loss_GAN_AB = criterion_GAN(D_B(fake_B), valid)
-        fake_A = G_BA(real_B)
-        loss_GAN_BA = criterion_GAN(D_A(fake_A), valid)
+        fake_B, fake_gray_B = G_AB(real_A, real_gray_A)
+        loss_GAN_AB = criterion_GAN(D_B(fake_B, fake_gray_B), valid)
+        loss_GAN_AB_meta = criterion_GAN(D_b(fake_gray_B), valid)
+        fake_A, fake_gray_A = G_BA(real_B, real_gray_B)
+        loss_GAN_BA = criterion_GAN(D_A(fake_A, fake_gray_A), valid)
+        loss_GAN_BA_meta = criterion_GAN(D_a(fake_gray_A), valid)
 
         loss_GAN = (loss_GAN_AB + loss_GAN_BA) / 2
+        loss_GAN_meta = (loss_GAN_AB_meta + loss_GAN_BA_meta) / 2
 
         # Cycle loss
-        recov_A = G_BA(fake_B)
-        loss_cycle_A = criterion_cycle(recov_A, real_A)
-        recov_B = G_AB(fake_A)
-        loss_cycle_B = criterion_cycle(recov_B, real_B)
+        recov_A, recov_gray_A = G_BA(fake_B, fake_gray_B)
+        loss_cycle_A, loss_cycle_a = criterion_cycle(recov_A, real_A), criterion_cycle(recov_gray_A, real_gray_A)
+        recov_B, recov_gray_B = G_AB(fake_A, fake_gray_A)
+        loss_cycle_B, loss_cycle_b = criterion_cycle(recov_B, real_B), criterion_cycle(recov_gray_B, real_gray_B)
 
         loss_cycle = (loss_cycle_A + loss_cycle_B) / 2
+        loss_cycle_meta = (loss_cycle_a + loss_cycle_b) / 2
 
         # Total loss
         loss_G = loss_GAN + opt.lambda_cyc * loss_cycle + opt.lambda_id * loss_identity
+        loss_G_meta = loss_GAN_meta + opt.lambda_cyc * loss_cycle_meta + opt.lambda_id * loss_identity_meta
+        loss_G_all = loss_G + loss_G_meta
 
-        loss_G.backward()
+        loss_G_all.backward()
         optimizer_G.step()
 
         # -----------------------
@@ -213,14 +264,17 @@ for epoch in range(opt.epoch, opt.n_epochs):
         optimizer_D_A.zero_grad()
 
         # Real loss
-        loss_real = criterion_GAN(D_A(real_A), valid)
+        loss_real, loss_real_meta = criterion_GAN(D_A(real_A, real_gray_A), valid), criterion_GAN(D_a(real_gray_A), valid)
         # Fake loss (on batch of previously generated samples)
         fake_A_ = fake_A_buffer.push_and_pop(fake_A)
-        loss_fake = criterion_GAN(D_A(fake_A_.detach()), fake)
+        fake_a_ = fake_a_buffer.push_and_pop(fake_gray_A)
+        loss_fake, loss_fake_meta = criterion_GAN(D_A(fake_A_.detach(), fake_a_.detach()), fake), criterion_GAN(D_a(fake_a_.detach()), fake)
         # Total loss
         loss_D_A = (loss_real + loss_fake) / 2
+        loss_D_A_meta = (loss_real_meta + loss_fake_meta) / 2
+        loss_D_A_all = loss_D_A + loss_D_A_meta
 
-        loss_D_A.backward()
+        loss_D_A_all.backward()
         optimizer_D_A.step()
 
         # -----------------------
@@ -230,17 +284,21 @@ for epoch in range(opt.epoch, opt.n_epochs):
         optimizer_D_B.zero_grad()
 
         # Real loss
-        loss_real = criterion_GAN(D_B(real_B), valid)
+        loss_real, loss_real_meta = criterion_GAN(D_B(real_B, real_gray_B), valid), criterion_GAN(D_b(real_gray_B), valid)
         # Fake loss (on batch of previously generated samples)
         fake_B_ = fake_B_buffer.push_and_pop(fake_B)
-        loss_fake = criterion_GAN(D_B(fake_B_.detach()), fake)
+        fake_b_ = fake_b_buffer.push_and_pop(fake_gray_B)
+        loss_fake, loss_fake_meta = criterion_GAN(D_B(fake_B_.detach(), fake_b_.detach()), fake), criterion_GAN(D_b(fake_b_.detach()), fake)
         # Total loss
         loss_D_B = (loss_real + loss_fake) / 2
+        loss_D_B_meta = (loss_real_meta + loss_fake_meta) / 2
+        loss_D_B_all = loss_D_B + loss_D_B_meta
 
-        loss_D_B.backward()
+        loss_D_B_all.backward()
         optimizer_D_B.step()
 
         loss_D = (loss_D_A + loss_D_B) / 2
+        loss_D_meta = (loss_D_A_meta + loss_D_B_meta) / 2
 
         # --------------
         #  Log Progress
@@ -254,17 +312,22 @@ for epoch in range(opt.epoch, opt.n_epochs):
 
         # Print log
         sys.stdout.write(
-            "\r[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f, adv: %f, cycle: %f, identity: %f] ETA: %s"
+            "\r[Epoch %d/%d] [Batch %d/%d] [D loss: (%.3f, %.3f)] [G loss: (%.3f, %.3f), adv: (%.3f, %.3f), cycle: (%.3f, %.3f), identity: (%.3f, %.3f)] ETA: %s"
             % (
                 epoch,
                 opt.n_epochs,
                 i,
                 len(dataloader),
                 loss_D.item(),
+                loss_D_meta.item(),
                 loss_G.item(),
+                loss_G_meta.item(),
                 loss_GAN.item(),
+                loss_GAN_meta.item(),
                 loss_cycle.item(),
+                loss_cycle_meta.item(),
                 loss_identity.item(),
+                loss_identity_meta.item(),
                 time_left,
             )
         )
@@ -277,10 +340,14 @@ for epoch in range(opt.epoch, opt.n_epochs):
     lr_scheduler_G.step()
     lr_scheduler_D_A.step()
     lr_scheduler_D_B.step()
+    lr_scheduler_D_a.step()
+    lr_scheduler_D_b.step()
 
     if opt.checkpoint_interval != -1 and epoch % opt.checkpoint_interval == 0:
         # Save model checkpoints
-        torch.save(G_AB.state_dict(), "saved_models/%s/G_AB_%d.pth" % (opt.dataset_name, epoch))
-        torch.save(G_BA.state_dict(), "saved_models/%s/G_BA_%d.pth" % (opt.dataset_name, epoch))
-        torch.save(D_A.state_dict(), "saved_models/%s/D_A_%d.pth" % (opt.dataset_name, epoch))
-        torch.save(D_B.state_dict(), "saved_models/%s/D_B_%d.pth" % (opt.dataset_name, epoch))
+        torch.save(G_AB.state_dict(), "saved_models_m/%s/G_AB_%d.pth" % (opt.dataset_name, epoch))
+        torch.save(G_BA.state_dict(), "saved_models_m/%s/G_BA_%d.pth" % (opt.dataset_name, epoch))
+        torch.save(D_A.state_dict(), "saved_models_m/%s/D_A_%d.pth" % (opt.dataset_name, epoch))
+        torch.save(D_B.state_dict(), "saved_models_m/%s/D_B_%d.pth" % (opt.dataset_name, epoch))
+        torch.save(D_a.state_dict(), "saved_models_m/%s/D_a_%d.pth" % (opt.dataset_name, epoch))
+        torch.save(D_b.state_dict(), "saved_models_m/%s/D_b_%d.pth" % (opt.dataset_name, epoch))

@@ -43,8 +43,9 @@ class ImageDataset(Dataset):
         return max(len(self.files_A), len(self.files_B))
 
 class PACS_Dataset(Dataset):
-    def __init__(self, root, transforms_=None, unaligned=False, mode="train"):#mode = {train, test, crossval}
+    def __init__(self, root, transforms_=None, unaligned=False, mode="train", transforms_gray_=None):#mode = {train, test, crossval}
         self.transform = transforms.Compose(transforms_)
+        self.transforms_gray = transforms.Compose(transforms_gray_)
         self.unaligned = unaligned
 
         def _prepare_data(path):
@@ -92,11 +93,27 @@ class PACS_Dataset(Dataset):
             image_C = to_rgb(image_C)
             image_D = to_rgb(image_D)
 
+        gray_A = self.transform(to_rgb(image_A.convert('L')))
+        gray_B = self.transform(to_rgb(image_B.convert('L')))
+        gray_C = self.transform(to_rgb(image_C.convert('L')))
+        gray_D = self.transform(to_rgb(image_D.convert('L')))
+
         item_A = self.transform(image_A)
         item_B = self.transform(image_B)
         item_C = self.transform(image_C)
         item_D = self.transform(image_D)
-        return {"A": item_A, "B": item_B, "C": item_C, "D": item_D, "label_A": label_A, "label_B": label_B, "label_C": label_C, "label_D": label_D}
+        return {"A": item_A, 
+                "B": item_B, 
+                "C": item_C, 
+                "D": item_D, 
+                "label_A": label_A, 
+                "label_B": label_B, 
+                "label_C": label_C, 
+                "label_D": label_D, 
+                "gray_A": gray_A, 
+                "gray_B": gray_B, 
+                "gray_C": gray_C, 
+                "gray_D": gray_D}
 
     def __len__(self):
         return max(len(self.files_A), len(self.files_B), len(self.files_C), len(self.files_D))
